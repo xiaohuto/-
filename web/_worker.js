@@ -137,8 +137,14 @@ async function review(request, env) {
       },
       body: JSON.stringify(body),
       signal: controller.signal,
-      redirect: 'error',
+      // Workers supports only manual/follow. Reject redirects below so that
+      // Authorization is never forwarded to another destination.
+      redirect: 'manual',
     });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      return failure(502, 'OpenAI 接口返回了异常跳转，已停止请求，请稍后重试。');
+    }
     if (!response.ok) {
       // Do not reflect upstream messages, credentials, request text or headers.
       const messages = {
@@ -179,7 +185,7 @@ export default {
     const path = new URL(request.url).pathname;
     if (path === '/api/status' && request.method === 'GET') {
       const {apiKey, password, model} = config(env);
-      return json({service: 'brand-review-cloudflare', version: '20261020-1',
+      return json({service: 'brand-review-cloudflare', version: '20261021-2',
         configured: !!apiKey, accessConfigured: password.length >= 12, model});
     }
     if (path === '/api/review') return review(request, env);

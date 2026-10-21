@@ -87,7 +87,7 @@ test('valid image request uses server credentials, fixed destination and bounded
   assert.equal(res.status,200);
   assert.equal(sent.url,'https://api.openai.com/v1/responses');
   assert.equal(sent.options.headers.Authorization,'Bearer '+env.OPENAI_API_KEY);
-  assert.equal(sent.options.redirect,'error');
+  assert.equal(sent.options.redirect,'manual');
   assert.equal(sent.body.model,'server-vision');
   assert.equal(sent.body.store,false);
   assert.equal(sent.body.max_output_tokens,12000);
@@ -104,6 +104,23 @@ test('encoded non-ASCII access password works', async () => {
       request({headers:{'X-Review-Token':encodeURIComponent(password)}}),
       {...env,REVIEW_PASSWORD:password}));
   assert.equal(res.status,200);
+});
+
+test('upstream redirects are rejected without forwarding credentials or redirect targets', async () => {
+  for (const status of [301,302,303,307,308]) {
+    let calls = 0;
+    const res = await withFetch(async (url, options) => {
+      calls++;
+      assert.equal(url, 'https://api.openai.com/v1/responses');
+      assert.equal(options.redirect, 'manual');
+      return new Response(null, {status, headers:{Location:'https://other.example/private'}});
+    }, () => worker.fetch(request(), env));
+    assert.equal(res.status, 502);
+    assert.equal(calls, 1);
+    const text = await res.text();
+    assert.ok(text.includes('异常跳转'));
+    assert.ok(!text.includes(env.OPENAI_API_KEY) && !text.includes('other.example'));
+  }
 });
 
 test('upstream errors are actionable and never echo upstream sensitive content', async () => {
