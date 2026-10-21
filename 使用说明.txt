@@ -1,0 +1,28 @@
+﻿品牌审图室 · 完整部署包
+
+这是唯一需要的压缩包。网页、两套规则、参考图、接口和部署文件都在里面，不需要改代码。
+
+第一步：上传到 GitHub
+解压本包，把里面全部文件复制到 GitHub Desktop 中 pinpai 仓库的本地文件夹，覆盖同名文件。点击 Commit，再点 Push origin。
+仓库首页应直接看到 package.json、wrangler.json、web 和 dist，不要把整个外层文件夹套在仓库里面。
+如果还没有本地 pinpai 仓库，先在 GitHub Desktop 中通过 File → Clone repository 选中自己的 pinpai 仓库。
+
+第二步：部署到 Cloudflare Pages
+继续使用你已经关联 pinpai 仓库的 Pages 项目。上传新提交后会自动部署；没有启动时点击重新部署。
+本包已配置输出目录 dist，并兼容你之前的构建命令 npm run build。
+若页面要求填写：框架选 None，构建命令填 npm run build，输出目录填 dist，根目录留空。
+
+第三步：填写 API（只做一次）
+Cloudflare 项目 → 设置 → 变量和密钥 → 生产环境，添加两项，类型都选 Secret／加密：
+OPENAI_API_KEY = 你的有效 OpenAI API 密钥
+REVIEW_PASSWORD = 自己设置的至少 12 位访问密码（不要使用 API 密钥）
+保存后重新部署。打开网站 → 模型与接口 → 输入这个访问密码 → 测试连接。
+API 密钥放在 Cloudflare 后台，不用改压缩包里的文件，也不用粘贴到网页里。
+
+以后更新：在 GitHub Desktop 提交并推送文件即可，Cloudflare 会自动更新。
+包中 dist/index.html 是完整 HTML；AI 审核请通过部署后的网站网址使用。
+
+已保留梦龙 22 条规则、顽皮 18 条规则、12 张参考图。构建及模拟接口测试已通过。
+真实 API 是否可用，还取决于你填写的密钥、模型权限与额度；本包没有包含真实密钥。
+
+配置依据：https://developers.cloudflare.com/pages/functions/wrangler-configuration/
