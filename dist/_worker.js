@@ -15,8 +15,78 @@ function json(data, status = 200) {
   });
 }
 
-function failure(status, message) {
-  return json({error: {message}}, status);
+function failure(status, message, details = {}) {
+  return json({error: {message, ...details}}, status);
+}
+
+function safeErrorText(value, secrets, maxLength = 500) {
+  if (typeof value !== 'string') return '';
+  let text = value;
+  for (const secret of secrets) if (secret) text = text.split(secret).join('[已隐藏]');
+  return text.replace(/sk-[A-Za-z0-9_-]+/g, '[已隐藏]')
+    .replace(/Bearer\s+[^\s"'<>]+/gi, 'Bearer [已隐藏]')
+    .replace(/data:image\/[^\s"'<>]+/gi, '[图片数据已隐藏]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[链接已隐藏]')
+    .replace(/[<>\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+async function upstreamFailure(response, secrets) {
+  // Read only a small JSON error object. Never return HTML, headers, request
+  // content or unredacted upstream error text to the browser.
+  let data = null;
+  if (response.headers.get('Content-Type')?.toLowerCase().includes('application/json')) {
+    const reader = response.body?.getReader();
+    if (reader) {
+      const chunks = [];
+      let bytes = 0;
+      try {
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 16384) { await reader.cancel(); break; }
+          chunks.push(value);
+        }
+        if (bytes <= 16384) {
+          const merged = new Uint8Array(bytes);
+          let offset = 0;
+          for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+          data = JSON.parse(new TextDecoder().decode(merged));
+        }
+      } catch { /* Preserve the HTTP status even if the error body is malformed. */ }
+      finally { reader.releaseLock(); }
+    }
+  } else {
+    try { await response.body?.cancel(); } catch {}
+  }
+  const error = data?.error && typeof data.error === 'object' ? data.error : {};
+  const code = safeErrorText(error.code, secrets, 80);
+  const detail = safeErrorText(error.message, secrets, 320);
+  const requestId = safeErrorText(response.headers.get('x-request-id'), secrets, 100);
+  const defaults = {
+    400: 'OpenAI 未接受本次请求，请检查错误原因。',
+    401: 'OpenAI 身份验证失败，请检查服务端 API 密钥与项目设置。',
+    403: 'OpenAI 拒绝了此服务器的请求；仅凭 403 无法确定是模型权限问题。',
+    404: 'OpenAI 未找到请求的模型或资源，请核对模型名称与项目访问权限。',
+    429: 'OpenAI 限制了本次调用，请根据错误原因检查额度或调用频率。',
+  };
+  let message = defaults[response.status] || 'OpenAI 服务暂时不可用，请稍后重试。';
+  if (code === 'unsupported_country_region_territory')
+    message = 'OpenAI 拒绝了当前服务器所在国家或地区的请求，请核对 OpenAI 支持地区及账户访问条件。';
+  else if (code === 'model_not_found')
+    message = '当前 API 项目无法访问指定模型，请核对模型名称或项目权限。';
+  else if (code === 'invalid_api_key')
+    message = 'OpenAI API Key 无效或已失效，请更新 Cloudflare 中的 OPENAI_API_KEY。';
+  else if (code === 'ip_not_authorized')
+    message = '请求服务器的 IP 未获 OpenAI 项目允许，请检查项目的 IP 白名单。';
+  else if (['insufficient_quota','credit_balance_exhausted','organization_spend_limit_exceeded','project_spend_limit_exceeded'].includes(code))
+    message = 'OpenAI API 额度或支出限额不足，请检查 API 账单及项目限额。';
+  if (detail) message += ' 上游说明：' + detail;
+  if (code) message += ' 错误码：' + code;
+  if (requestId) message += ' 请求编号：' + requestId;
+  return failure(response.status, message, {
+    ...(code ? {code} : {}), ...(requestId ? {request_id:requestId} : {}),
+  });
 }
 
 function config(env) {
@@ -146,16 +216,7 @@ async function review(request, env) {
       return failure(502, 'OpenAI 接口返回了异常跳转，已停止请求，请稍后重试。');
     }
     if (!response.ok) {
-      // Do not reflect upstream messages, credentials, request text or headers.
-      const messages = {
-        400: 'OpenAI 未接受本次请求，请检查图片、规则内容和模型支持。',
-        401: 'OpenAI API Key 无效或已失效，请更新 Cloudflare 中的 OPENAI_API_KEY。',
-        403: '当前 OpenAI 项目无权使用此模型，请检查模型权限。',
-        404: '当前模型不可用；可在 Cloudflare 中设置 OPENAI_MODEL 为账号支持的图片模型。',
-        429: 'OpenAI 额度不足或请求过于频繁，请检查 API 账单或稍后重试。',
-      };
-      await response.body?.cancel();
-      return failure(response.status, messages[response.status] || 'OpenAI 服务暂时不可用，请稍后重试。');
+      return await upstreamFailure(response, [apiKey, password]);
     }
     if (!response.headers.get('Content-Type')?.includes('application/json')) {
       await response.body?.cancel();
@@ -185,7 +246,7 @@ export default {
     const path = new URL(request.url).pathname;
     if (path === '/api/status' && request.method === 'GET') {
       const {apiKey, password, model} = config(env);
-      return json({service: 'brand-review-cloudflare', version: '20261021-2',
+      return json({service: 'brand-review-cloudflare', version: '20261021-3',
         configured: !!apiKey, accessConfigured: password.length >= 12, model});
     }
     if (path === '/api/review') return review(request, env);

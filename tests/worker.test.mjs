@@ -141,3 +141,47 @@ test('incomplete, non-JSON and network errors never return a valid report', asyn
     assert.equal((await withFetch(fake,()=>worker.fetch(request(),env))).status,502);
   }
 });
+
+test('403 preserves specific region rejection and request ID instead of claiming model permission', async () => {
+  const res = await withFetch(async () => Response.json({error:{
+    code:'unsupported_country_region_territory', type:'request_forbidden',
+    message:'Country, region, or territory not supported.'}},
+    {status:403, headers:{'x-request-id':'req_test_region'}}), () => worker.fetch(request(),env));
+  const data = await res.json();
+  assert.equal(res.status,403);
+  assert.equal(data.error.code,'unsupported_country_region_territory');
+  assert.equal(data.error.request_id,'req_test_region');
+  assert.ok(data.error.message.includes('国家或地区'));
+  assert.ok(!data.error.message.includes('无权使用此模型'));
+});
+
+test('403 model rejection keeps the actual model code', async () => {
+  const res = await withFetch(async () => Response.json({error:{code:'model_not_found',
+    message:'The requested model is not available.'}},{status:403}), () => worker.fetch(request(),env));
+  const data = await res.json();
+  assert.equal(data.error.code,'model_not_found');
+  assert.ok(data.error.message.includes('指定模型'));
+});
+
+test('error details redact credentials and unsafe content in every displayed field', async () => {
+  const res = await withFetch(async () => Response.json({error:{
+    code:env.OPENAI_API_KEY,message:`${env.REVIEW_PASSWORD} ${env.OPENAI_API_KEY} sk-placeholder-long-token Bearer raw-token <script>boom</script> https://private.example/path?token=x data:image/png;base64,aGVsbG8=`}},
+    {status:403,headers:{'x-request-id':env.REVIEW_PASSWORD}}), () => worker.fetch(request(),env));
+  const text = await res.text();
+  for (const secret of [env.REVIEW_PASSWORD,env.OPENAI_API_KEY,'sk-placeholder','raw-token','<script>','private.example','aGVsbG8='])
+    assert.ok(!text.includes(secret),secret);
+});
+
+test('HTML, invalid and excessive upstream errors keep 403 without exposing body contents', async () => {
+  for (const body of [
+    new Response('<html>private upstream contents</html>',{status:403,headers:{'Content-Type':'text/html'}}),
+    new Response('{broken', {status:403,headers:{'Content-Type':'application/json'}}),
+    Response.json({error:{message:'private upstream contents'+'x'.repeat(17000)}},{status:403}),
+  ]) {
+    const res = await withFetch(async () => body, () => worker.fetch(request(),env));
+    assert.equal(res.status,403);
+    const text = await res.text();
+    assert.ok(text.includes('仅凭 403'));
+    assert.ok(!text.includes('private upstream contents'));
+  }
+});
